@@ -3,25 +3,60 @@
 use std::path::PathBuf;
 use std::io::Write;
 use std::env;
+use std::collections::HashMap;
 
+use reqwest;
+use tokio;
+use shellexpand;
+use chrono::prelude::*;
+use chrono_tz::Tz;
 use regex::Regex;
 use clap::{Parser, Args};
 use serde::Deserialize;
 use eyre::{eyre, Result};
 use lazy_static::lazy_static;
-use reqwest;
-use tokio;
-use shellexpand;
+
+const TIMEZONE: &str = "America/Los_Angeles";
 
 lazy_static! {
     static ref YOUTUBE_API_KEY: String = env::var("YOUTUBE_API_KEY").expect("YOUTUBE_API_KEY not set in environment");
     static ref CHATGPT_API_KEY: String = env::var("CHATGPT_API_KEY").expect("CHATGPT_API_KEY not set in environment");
+
+    static ref RESOLUTIONS: HashMap<&'static str, (usize, usize)> = {
+        let mut m = HashMap::new();
+        m.insert("nHD", (640, 360));
+        m.insert("FWVGA", (854, 480));
+        m.insert("qHD", (960, 540));
+        m.insert("SD", (1280, 720));
+        m.insert("WXGA", (1366, 768));
+        m.insert("HD+", (1600, 900));
+        m.insert("FHD", (1920, 1080));
+        m.insert("WQHD", (2560, 1440));
+        m.insert("QHD+", (3200, 1800));
+        m.insert("4K", (3840, 2160));
+        m.insert("5K", (5120, 2880));
+        m.insert("8K", (7680, 4320));
+        m.insert("16K", (15360, 8640));
+        m
+    };
+
+    static ref SHORTS_RESOLUTIONS: HashMap<&'static str, (usize, usize)> = {
+        let mut m = HashMap::new();
+        // Common mobile screen aspect ratios for vertical videos
+        m.insert("480p", (480, 854));  // Standard Definition
+        m.insert("720p", (720, 1280)); // HD
+        m.insert("1080p", (1080, 1920)); // Full HD
+        m.insert("1440p", (1440, 2560)); // Quad HD
+        m.insert("2160p", (2160, 3840)); // 4K UHD
+        // Add more resolutions if needed
+        m
 }
 
 #[derive(Deserialize, Debug)]
 struct Config {
     vault: PathBuf,
     resolution: String,
+    shorts_resolution: String,
     frontmatter: Frontmatter,
 }
 
@@ -75,11 +110,28 @@ struct VideoMetadata {
     published_at: String,
     tags: Vec<String>,
 }
-
+/*
 fn expanduser(path: &str) -> Result<PathBuf> {
     let expanded_path = shellexpand::tilde(path);
     Ok(PathBuf::from(expanded_path.into_owned()))
 }
+*/
+
+fn expanduser<T: AsRef<str>>(path: T) -> Result<PathBuf> {
+    let expanded_path_str = shellexpand::tilde(path.as_ref());
+    Ok(PathBuf::from(expanded_path_str.into_owned()))
+}
+
+/*
+fn load_config(config_path: PathBuf) -> Result<Config> {
+    let config_path_expanded = expanduser(config_path)?;
+    let config_str = std::fs::read_to_string(config_path_expanded)
+        .map_err(|e| eyre!("Failed to read config file: {}", e))?;
+    let config: Config = serde_yaml::from_str(&config_str)
+        .map_err(|e| eyre!("Failed to parse config file: {}", e))?;
+    Ok(config)
+}
+*/
 
 fn load_config(config_path: PathBuf) -> Result<Config> {
     let config_path_str = config_path.to_str()
@@ -92,6 +144,7 @@ fn load_config(config_path: PathBuf) -> Result<Config> {
     Ok(config)
 }
 
+
 fn extract_video_id(url: &str) -> Result<String> {
     let pattern = Regex::new(r#"(youtu\.be/|youtube\.com/(watch\?(.*&)?v=|(embed|v|shorts)/))([^?&">]+)"#)
         .map_err(|e| eyre!("Failed to compile regex: {}", e))?;
@@ -102,9 +155,30 @@ fn extract_video_id(url: &str) -> Result<String> {
         .ok_or_else(|| eyre!("Failed to extract video ID from URL"))
 }
 
+/*
 async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, frontmatter: &Frontmatter) -> Result<()> {
     let file_name = sanitize_filename(&metadata.title);
-    let file_path = vault_path.join("youtube").join(file_name + ".md");
+    println!("file_name: {}", file_name);
+    let vault_path_expanded = expanduser(vault_path)?;
+    let file_path = vault_path_expanded.join("youtube").join(file_name + ".md");
+    println!("file_path: {}", file_path.display());
+
+    let mut file = std::fs::File::create(&file_path)
+        .map_err(|e| eyre!("Failed to create markdown file: {}", e))?;
+
+    let frontmatter_str = format_frontmatter(frontmatter, metadata);
+    write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, metadata.description)
+        .map_err(|e| eyre!("Failed to write to markdown file: {}", e))
+}
+*/
+
+async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, frontmatter: &Frontmatter) -> Result<()> {
+    let vault_path_str = vault_path.to_str()
+        .ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
+    let vault_path_expanded = expanduser(vault_path_str)?;
+
+    let file_name = sanitize_filename(&metadata.title);
+    let file_path = vault_path_expanded.join("youtube").join(file_name + ".md");
 
     let mut file = std::fs::File::create(&file_path)
         .map_err(|e| eyre!("Failed to create markdown file: {}", e))?;
@@ -140,10 +214,20 @@ fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> St
     frontmatter_str
 }
 
+/*
 fn generate_embed_code(video_id: &str, resolution: &String) -> String {
     format!("<iframe src='https://www.youtube.com/embed/{}' resolution='{}'></iframe>", video_id, resolution)
 }
+*/
 
+fn generate_embed_code(video_id: &str, resolution: &str) -> Result<String> {
+    let (width, height) = RESOLUTIONS.get(resolution)
+        .ok_or_else(|| eyre!("Resolution not found: {}", resolution))?;
+
+    Ok(format!("<iframe width=\"{}\" height=\"{}\" src=\"https://www.youtube.com/embed/{}\" frameborder=\"0\" allowfullscreen></iframe>", width, height, video_id))
+}
+
+/*
 fn current_date() -> String {
     // Implement to return current date in desired format
     "2023-01-01".to_string()
@@ -169,13 +253,40 @@ fn sanitize_tag(tag: &str) -> String {
 fn sanitize_filename(title: &str) -> String {
     title.replace(&['<', '>', ':', '"', '/', '\\', '|', '?', '*'][..], "-")
 }
+*/
+
+fn current_date() -> String {
+    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
+    Utc::now().with_timezone(&tz).format("%Y-%m-%d").to_string()
+}
+
+fn current_day() -> String {
+    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
+    Utc::now().with_timezone(&tz).format("%a").to_string()
+}
+
+fn current_time() -> String {
+    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
+    Utc::now().with_timezone(&tz).format("%H:%M").to_string()
+}
+
+fn sanitize_tag(tag: &str) -> String {
+    tag.replace("'", "")
+       .chars()
+       .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { '-' })
+       .collect::<String>()
+       .replace(' ', "-")
+       .to_lowercase()
+}
+
+fn sanitize_filename(title: &str) -> String {
+    title.replace(&['<', '>', ':', '"', '/', '\\', '|', '?', '*'][..], "-")
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-
     let config = load_config(args.config)?;
-    println!("Config: {:?}", config);
 
     match args.youtube_url {
         Some(url) => handle_url(&url, &config).await,
@@ -190,6 +301,7 @@ async fn handle_url(url: &str, config: &Config) -> Result<()> {
     }
 }
 
+/*
 async fn handle_youtube_url(url: &str, config: &Config) -> Result<()> {
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
@@ -197,7 +309,17 @@ async fn handle_youtube_url(url: &str, config: &Config) -> Result<()> {
 
     create_markdown_file(&metadata, &embed_code, &config.vault, &config.frontmatter).await
 }
+*/
 
+async fn handle_youtube_url(url: &str, config: &Config) -> Result<()> {
+    let video_id = extract_video_id(url)?;
+    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
+
+    let embed_code_result = generate_embed_code(&video_id, &config.resolution);
+    let embed_code = embed_code_result?; // Handle the Result here
+
+    create_markdown_file(&metadata, &embed_code, &config.vault, &config.frontmatter).await
+}
 
 async fn handle_weblink_url(url: &str, config: &Config) -> Result<()> {
     // Web link handling logic
@@ -213,7 +335,6 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
     let response = reqwest::get(&url).await?
         .json::<serde_json::Value>().await?;
 
-    // Parse the response to extract video metadata
     let snippet = &response["items"][0]["snippet"];
     Ok(VideoMetadata {
         id: video_id.to_string(),
