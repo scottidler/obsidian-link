@@ -300,82 +300,56 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
     })
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Mock a minimal configuration for testing purposes
-    fn mock_config() -> Config {
-        Config {
-            vault: PathBuf::from("/some/path"),
-            frontmatter: Frontmatter {
-                date: None,
-                day: None,
-                time: None,
-                tags: None,
-                url: None,
-                author: None,
-            },
-            links: vec![
-                Link {
-                    name: "youtube".to_string(),
-                    regex: r"https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)|https?://youtu\.be/([a-zA-Z0-9_-]+)".to_string(),
-                    resolution: "FWVGA".to_string(),
-                    folder: "youtube".to_string(),
-                },
-                Link {
-                    name: "shorts".to_string(),
-                    regex: r"https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]+)".to_string(),
-                    resolution: "480p".to_string(),
-                    folder: "youtube".to_string(),
-                },
-                // The default case should come last
-                Link {
-                    name: "default".to_string(),
-                    regex: r"https?://.*".to_string(),
-                    resolution: "FWVGA".to_string(),
-                    folder: "default".to_string(),
-                },
-            ],
+    #[tokio::test]
+    async fn test_youtube_url_identification() {
+        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
+
+        let youtube_urls = vec![
+            "https://www.youtube.com/watch?v=y4evLICF8kk",
+            "https://www.youtube.com/watch?v=U3HndX2QnSo",
+            "https://youtu.be/EkDxsQRbIwoA",
+            "https://youtu.be/m7lnIdudEy8?si=VE-14Y1Sk93RdA5u",
+        ];
+
+        for url in youtube_urls {
+            let link_type = LinkType::from_url(url, &config).unwrap();
+            assert!(matches!(link_type, LinkType::YouTube(..)));
         }
     }
 
-    #[test]
-    fn test_youtube_url_identification() {
-        let youtube_urls = vec![
-            "https://www.youtube.com/watch?v=y4evLICF8kk",
-            "https://youtu.be/EkDxsQRbIwoA",
-        ];
+    #[tokio::test]
+    async fn test_youtube_shorts_identification() {
+        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
 
         let shorts_urls = vec![
             "https://www.youtube.com/shorts/gGrqPbb6fuM",
+            "https://www.youtube.com/shorts/FjkS5rjNq-A",
         ];
 
-        let config = mock_config();
-
-        for url in youtube_urls {
-            let result = LinkType::from_url(url, &config);
-            assert!(matches!(result, Ok(LinkType::YouTube(_, _, _, _))), "YouTube URL not identified correctly: {}", url);
-        }
-
         for url in shorts_urls {
-            let result = LinkType::from_url(url, &config);
-            assert!(matches!(result, Ok(LinkType::YouTube(_, _, _, _))), "Shorts URL not identified correctly: {}", url);
+            let link_type = LinkType::from_url(url, &config).unwrap();
+            assert!(matches!(link_type, LinkType::YouTube(..)));
         }
     }
 
-    #[test]
-    fn test_weblink_url_identification() {
-        let web_links = vec![
+    #[tokio::test]
+    async fn test_weblink_identification() {
+        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
+
+        let weblink_urls = vec![
             "https://parrot.ai/",
-            // ... other web links ...
+            "https://pdfgpt.io/",
+            // Add other weblink URLs here
         ];
 
-        let config = mock_config();
-
-        for url in web_links {
-            let result = LinkType::from_url(url, &config);
-            assert!(matches!(result, Ok(LinkType::WebLink(_, _, _, _))), "WebLink URL not identified correctly: {}", url);
+        for url in weblink_urls {
+            let link_type = LinkType::from_url(url, &config).unwrap();
+            assert!(matches!(link_type, LinkType::WebLink(..)));
         }
     }
 }
