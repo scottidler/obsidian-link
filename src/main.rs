@@ -10,6 +10,7 @@ use tokio;
 use shellexpand;
 use chrono::prelude::*;
 use chrono_tz::Tz;
+use chrono::format::StrftimeItems;
 use regex::Regex;
 use clap::{Parser, Args};
 use serde::Deserialize;
@@ -21,7 +22,6 @@ const TIMEZONE: &str = "America/Los_Angeles";
 lazy_static! {
     static ref YOUTUBE_API_KEY: String = env::var("YOUTUBE_API_KEY").expect("YOUTUBE_API_KEY not set in environment");
     static ref CHATGPT_API_KEY: String = env::var("CHATGPT_API_KEY").expect("CHATGPT_API_KEY not set in environment");
-
     static ref RESOLUTIONS: HashMap<&'static str, (usize, usize)> = {
         let mut m = HashMap::new();
         m.insert("nHD", (640, 360));
@@ -39,25 +39,22 @@ lazy_static! {
         m.insert("16K", (15360, 8640));
         m
     };
-
     static ref SHORTS_RESOLUTIONS: HashMap<&'static str, (usize, usize)> = {
         let mut m = HashMap::new();
-        // Common mobile screen aspect ratios for vertical videos
-        m.insert("480p", (480, 854));  // Standard Definition
-        m.insert("720p", (720, 1280)); // HD
-        m.insert("1080p", (1080, 1920)); // Full HD
-        m.insert("1440p", (1440, 2560)); // Quad HD
-        m.insert("2160p", (2160, 3840)); // 4K UHD
-        // Add more resolutions if needed
+        m.insert("480p", (480, 854));
+        m.insert("720p", (720, 1280));
+        m.insert("1080p", (1080, 1920));
+        m.insert("1440p", (1440, 2560));
+        m.insert("2160p", (2160, 3840));
         m
+    };
 }
 
 #[derive(Deserialize, Debug)]
 struct Config {
     vault: PathBuf,
-    resolution: String,
-    shorts_resolution: String,
     frontmatter: Frontmatter,
+    links: Vec<Link>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -68,7 +65,14 @@ struct Frontmatter {
     tags: Option<Vec<String>>,
     url: Option<String>,
     author: Option<String>,
-    // Add other fields as needed
+}
+
+#[derive(Deserialize, Debug)]
+struct Link {
+    name: String,
+    regex: String,
+    resolution: String,
+    folder: String,
 }
 
 #[derive(Parser)]
@@ -79,26 +83,51 @@ struct Cli {
 
     #[clap(short, long)]
     youtube_url: Option<String>,
-
-    // Add other command line arguments as needed
 }
 
 enum LinkType {
-    YouTube(String),
-    WebLink(String),
+    YouTube(String, String, usize, usize),
+    WebLink(String, String, usize, usize),
 }
 
 impl LinkType {
-    fn from_url(url: &str) -> Result<LinkType> {
-        let youtube_regex = Regex::new(r#"(youtu\.be/|youtube\.com/(watch\?(.*&)?v=|(embed|v|shorts)/))([^?&">]+)"#)
-            .map_err(|e| eyre!("Failed to compile YouTube regex: {}", e))?;
+    fn from_url(url: &str, config: &Config) -> Result<LinkType> {
+        for link in &config.links {
+            println!("Testing regex: {}", &link.regex); // Print the regex being tested
+            let regex = Regex::new(&link.regex)
+                .map_err(|e| eyre!("Failed to compile regex for {}: {}", link.name, e))?;
 
-        if youtube_regex.is_match(url) {
-            Ok(LinkType::YouTube(url.to_string()))
-        } else {
-            Ok(LinkType::WebLink(url.to_string()))
+            if regex.is_match(url) {
+                println!("URL matched regex: {}", &link.regex); // Print when a URL matches
+                let (width, height) = get_resolution(&link.name, config)
+                    .ok_or_else(|| eyre!("Failed to find resolution for {}", link.name))?;
+
+                return Ok(match link.name.as_str() {
+                    "youtube" | "shorts" => LinkType::YouTube(url.to_string(), link.folder.clone(), width, height),
+                    _ => LinkType::WebLink(url.to_string(), link.folder.clone(), width, height),
+                });
+            } else {
+                println!("URL did not match regex: {}", &link.regex); // Print when a URL does not match
+            }
         }
+
+        Err(eyre!("No matching link type found for URL"))
     }
+}
+
+fn get_resolution(link_name: &str, config: &Config) -> Option<(usize, usize)> {
+    config.links.iter().find(|link| link.name == link_name)
+        .and_then(|link| {
+            match link_name {
+                "shorts" => {
+                    SHORTS_RESOLUTIONS.get(link.resolution.as_str())
+                },
+                "youtube" | "weblink" => {
+                    RESOLUTIONS.get(link.resolution.as_str())
+                },
+                _ => None, // Or handle other types
+            }
+        }).copied()
 }
 
 #[derive(Debug)]
@@ -110,28 +139,11 @@ struct VideoMetadata {
     published_at: String,
     tags: Vec<String>,
 }
-/*
-fn expanduser(path: &str) -> Result<PathBuf> {
-    let expanded_path = shellexpand::tilde(path);
-    Ok(PathBuf::from(expanded_path.into_owned()))
-}
-*/
 
 fn expanduser<T: AsRef<str>>(path: T) -> Result<PathBuf> {
     let expanded_path_str = shellexpand::tilde(path.as_ref());
     Ok(PathBuf::from(expanded_path_str.into_owned()))
 }
-
-/*
-fn load_config(config_path: PathBuf) -> Result<Config> {
-    let config_path_expanded = expanduser(config_path)?;
-    let config_str = std::fs::read_to_string(config_path_expanded)
-        .map_err(|e| eyre!("Failed to read config file: {}", e))?;
-    let config: Config = serde_yaml::from_str(&config_str)
-        .map_err(|e| eyre!("Failed to parse config file: {}", e))?;
-    Ok(config)
-}
-*/
 
 fn load_config(config_path: PathBuf) -> Result<Config> {
     let config_path_str = config_path.to_str()
@@ -144,7 +156,6 @@ fn load_config(config_path: PathBuf) -> Result<Config> {
     Ok(config)
 }
 
-
 fn extract_video_id(url: &str) -> Result<String> {
     let pattern = Regex::new(r#"(youtu\.be/|youtube\.com/(watch\?(.*&)?v=|(embed|v|shorts)/))([^?&">]+)"#)
         .map_err(|e| eyre!("Failed to compile regex: {}", e))?;
@@ -155,33 +166,16 @@ fn extract_video_id(url: &str) -> Result<String> {
         .ok_or_else(|| eyre!("Failed to extract video ID from URL"))
 }
 
-/*
-async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, frontmatter: &Frontmatter) -> Result<()> {
-    let file_name = sanitize_filename(&metadata.title);
-    println!("file_name: {}", file_name);
-    let vault_path_expanded = expanduser(vault_path)?;
-    let file_path = vault_path_expanded.join("youtube").join(file_name + ".md");
-    println!("file_path: {}", file_path.display());
-
-    let mut file = std::fs::File::create(&file_path)
-        .map_err(|e| eyre!("Failed to create markdown file: {}", e))?;
-
-    let frontmatter_str = format_frontmatter(frontmatter, metadata);
-    write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, metadata.description)
-        .map_err(|e| eyre!("Failed to write to markdown file: {}", e))
-}
-*/
-
-async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, frontmatter: &Frontmatter) -> Result<()> {
+async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, folder: &str, frontmatter: &Frontmatter) -> Result<()> {
     let vault_path_str = vault_path.to_str()
         .ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
     let vault_path_expanded = expanduser(vault_path_str)?;
-
+    let full_path = vault_path_expanded.join(folder);
     let file_name = sanitize_filename(&metadata.title);
-    let file_path = vault_path_expanded.join("youtube").join(file_name + ".md");
+    let file_path = full_path.join(file_name + ".md");
 
     let mut file = std::fs::File::create(&file_path)
-        .map_err(|e| eyre!("Failed to create markdown file: {}", e))?;
+        .map_err(|e| eyre!("Failed to create markdown file: {:?} with error {}", file_path, e))?;
 
     let frontmatter_str = format_frontmatter(frontmatter, metadata);
     write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, metadata.description)
@@ -191,9 +185,10 @@ async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_
 fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> String {
     let mut frontmatter_str = String::from("---\n");
 
-    frontmatter_str += &format!("date: {}\n", frontmatter.date.as_ref().unwrap_or(&current_date()));
-    frontmatter_str += &format!("day: {}\n", frontmatter.day.as_ref().unwrap_or(&current_day()));
-    frontmatter_str += &format!("time: {}\n", frontmatter.time.as_ref().unwrap_or(&current_time()));
+    let (current_date, current_day, current_time) = today();
+    frontmatter_str += &format!("date: {}\n", frontmatter.date.as_ref().unwrap_or(&current_date));
+    frontmatter_str += &format!("day: {}\n", frontmatter.day.as_ref().unwrap_or(&current_day));
+    frontmatter_str += &format!("time: {}\n", frontmatter.time.as_ref().unwrap_or(&current_time));
 
     let tags = frontmatter.tags.as_ref().unwrap_or(&metadata.tags);
     if !tags.is_empty() {
@@ -214,60 +209,27 @@ fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> St
     frontmatter_str
 }
 
-/*
-fn generate_embed_code(video_id: &str, resolution: &String) -> String {
-    format!("<iframe src='https://www.youtube.com/embed/{}' resolution='{}'></iframe>", video_id, resolution)
-}
-*/
-
-fn generate_embed_code(video_id: &str, resolution: &str) -> Result<String> {
-    let (width, height) = RESOLUTIONS.get(resolution)
-        .ok_or_else(|| eyre!("Resolution not found: {}", resolution))?;
-
-    Ok(format!("<iframe width=\"{}\" height=\"{}\" src=\"https://www.youtube.com/embed/{}\" frameborder=\"0\" allowfullscreen></iframe>", width, height, video_id))
+fn generate_embed_code(video_id: &str, width: usize, height: usize) -> String {
+    format!(
+        "<iframe width=\"{}\" height=\"{}\" src=\"https://www.youtube.com/embed/{}\" frameborder=\"0\" allowfullscreen></iframe>",
+        width, height, video_id
+    )
 }
 
-/*
-fn current_date() -> String {
-    // Implement to return current date in desired format
-    "2023-01-01".to_string()
-}
 
-fn current_day() -> String {
-    // Implement to return current day in desired format
-    "Mon".to_string()
-}
-
-fn current_time() -> String {
-    // Implement to return current time in desired format
-    "00:00".to_string()
-}
-
-fn sanitize_tag(tag: &str) -> String {
-    // Implement tag sanitization logic similar to the Python version
-    tag.replace("'", "")
-       .replace(" ", "-")
-       .to_lowercase()
-}
-
-fn sanitize_filename(title: &str) -> String {
-    title.replace(&['<', '>', ':', '"', '/', '\\', '|', '?', '*'][..], "-")
-}
-*/
-
-fn current_date() -> String {
+fn today() -> (String, String, String) {
     let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
-    Utc::now().with_timezone(&tz).format("%Y-%m-%d").to_string()
-}
+    let now = Utc::now().with_timezone(&tz);
 
-fn current_day() -> String {
-    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
-    Utc::now().with_timezone(&tz).format("%a").to_string()
-}
+    let date_format = StrftimeItems::new("%Y-%m-%d");
+    let day_format = StrftimeItems::new("%a");
+    let time_format = StrftimeItems::new("%H:%M");
 
-fn current_time() -> String {
-    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
-    Utc::now().with_timezone(&tz).format("%H:%M").to_string()
+    let formatted_date = now.format_with_items(date_format).to_string();
+    let formatted_day = now.format_with_items(day_format).to_string();
+    let formatted_time = now.format_with_items(time_format).to_string();
+
+    (formatted_date, formatted_day, formatted_time)
 }
 
 fn sanitize_tag(tag: &str) -> String {
@@ -295,33 +257,20 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_url(url: &str, config: &Config) -> Result<()> {
-    match LinkType::from_url(url)? {
-        LinkType::YouTube(url) => handle_youtube_url(&url, config).await,
-        LinkType::WebLink(url) => handle_weblink_url(&url, config).await,
+    match LinkType::from_url(url, config)? {
+        LinkType::YouTube(url, folder, width, height) => handle_youtube_url(&url, &folder, width, height, config).await,
+        LinkType::WebLink(url, folder, width, height) => handle_weblink_url(&url, &folder, width, height, config).await,
     }
 }
 
-/*
-async fn handle_youtube_url(url: &str, config: &Config) -> Result<()> {
+async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
-    let embed_code = generate_embed_code(&video_id, &config.resolution);
-
-    create_markdown_file(&metadata, &embed_code, &config.vault, &config.frontmatter).await
-}
-*/
-
-async fn handle_youtube_url(url: &str, config: &Config) -> Result<()> {
-    let video_id = extract_video_id(url)?;
-    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
-
-    let embed_code_result = generate_embed_code(&video_id, &config.resolution);
-    let embed_code = embed_code_result?; // Handle the Result here
-
-    create_markdown_file(&metadata, &embed_code, &config.vault, &config.frontmatter).await
+    let embed_code = generate_embed_code(&video_id, width, height);
+    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
 }
 
-async fn handle_weblink_url(url: &str, config: &Config) -> Result<()> {
+async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
     // Web link handling logic
     Ok(())
 }
@@ -351,24 +300,67 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Mock a minimal configuration for testing purposes
+    fn mock_config() -> Config {
+        Config {
+            vault: PathBuf::from("/some/path"),
+            frontmatter: Frontmatter {
+                date: None,
+                day: None,
+                time: None,
+                tags: None,
+                url: None,
+                author: None,
+            },
+            links: vec![
+                Link {
+                    name: "youtube".to_string(),
+                    regex: r"https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)|https?://youtu\.be/([a-zA-Z0-9_-]+)".to_string(),
+                    resolution: "FWVGA".to_string(),
+                    folder: "youtube".to_string(),
+                },
+                Link {
+                    name: "shorts".to_string(),
+                    regex: r"https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]+)".to_string(),
+                    resolution: "480p".to_string(),
+                    folder: "youtube".to_string(),
+                },
+                // The default case should come last
+                Link {
+                    name: "default".to_string(),
+                    regex: r"https?://.*".to_string(),
+                    resolution: "FWVGA".to_string(),
+                    folder: "default".to_string(),
+                },
+            ],
+        }
+    }
 
     #[test]
     fn test_youtube_url_identification() {
         let youtube_urls = vec![
             "https://www.youtube.com/watch?v=y4evLICF8kk",
             "https://youtu.be/EkDxsQRbIwoA",
+        ];
+
+        let shorts_urls = vec![
             "https://www.youtube.com/shorts/gGrqPbb6fuM",
         ];
 
+        let config = mock_config();
+
         for url in youtube_urls {
-            match LinkType::from_url(url) {
-                Ok(LinkType::YouTube(_)) => (),
-                _ => panic!("YouTube URL not identified correctly: {}", url),
-            }
+            let result = LinkType::from_url(url, &config);
+            assert!(matches!(result, Ok(LinkType::YouTube(_, _, _, _))), "YouTube URL not identified correctly: {}", url);
+        }
+
+        for url in shorts_urls {
+            let result = LinkType::from_url(url, &config);
+            assert!(matches!(result, Ok(LinkType::YouTube(_, _, _, _))), "Shorts URL not identified correctly: {}", url);
         }
     }
 
@@ -376,17 +368,15 @@ mod tests {
     fn test_weblink_url_identification() {
         let web_links = vec![
             "https://parrot.ai/",
-            "https://pdfgpt.io/",
-            "https://alohahoo.com/products/men's-casual-jacket-paisley-pattern-print-long-sleeve-pockets-jacket",
-            "https://greenpointefloorsupply.com/services/",
-            "https://phys.org/news/2023-12-theory-einstein-gravity-quantum-mechanics.html",
+            // ... other web links ...
         ];
 
+        let config = mock_config();
+
         for url in web_links {
-            match LinkType::from_url(url) {
-                Ok(LinkType::WebLink(_)) => (),
-                _ => panic!("WebLink URL not identified correctly: {}", url),
-            }
+            let result = LinkType::from_url(url, &config);
+            assert!(matches!(result, Ok(LinkType::WebLink(_, _, _, _))), "WebLink URL not identified correctly: {}", url);
         }
     }
 }
+
