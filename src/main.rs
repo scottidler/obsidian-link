@@ -1,6 +1,6 @@
 #![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, unused_mut, dead_code))]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::io::Write;
 use std::env;
 use std::collections::HashMap;
@@ -86,6 +86,7 @@ struct Cli {
 }
 
 enum LinkType {
+    Shorts(String, String, usize, usize),
     YouTube(String, String, usize, usize),
     WebLink(String, String, usize, usize),
 }
@@ -93,42 +94,34 @@ enum LinkType {
 impl LinkType {
     fn from_url(url: &str, config: &Config) -> Result<LinkType> {
         for link in &config.links {
-            println!("Testing regex: {}", &link.regex); // Print the regex being tested
-            let regex = Regex::new(&link.regex)
-                .map_err(|e| eyre!("Failed to compile regex for {}: {}", link.name, e))?;
-
+            let regex = Regex::new(&link.regex)?;
             if regex.is_match(url) {
-                println!("URL matched regex: {}", &link.regex); // Print when a URL matches
-                let (width, height) = get_resolution(&link.name, config)
-                    .ok_or_else(|| eyre!("Failed to find resolution for {}", link.name))?;
-
+                let (width, height) = get_resolution(&link.name, config)?;
                 return Ok(match link.name.as_str() {
-                    "youtube" | "shorts" => LinkType::YouTube(url.to_string(), link.folder.clone(), width, height),
+                    "shorts" => LinkType::Shorts(url.to_string(), link.folder.clone(), width, height),
+                    "youtube" => LinkType::YouTube(url.to_string(), link.folder.clone(), width, height),
                     _ => LinkType::WebLink(url.to_string(), link.folder.clone(), width, height),
                 });
-            } else {
-                println!("URL did not match regex: {}", &link.regex); // Print when a URL does not match
             }
         }
-
         Err(eyre!("No matching link type found for URL"))
     }
 }
 
-fn get_resolution(link_name: &str, config: &Config) -> Option<(usize, usize)> {
-    config.links.iter().find(|link| link.name == link_name)
-        .and_then(|link| {
-            match link_name {
-                "shorts" => {
-                    SHORTS_RESOLUTIONS.get(link.resolution.as_str())
-                },
-                "youtube" | "weblink" => {
-                    RESOLUTIONS.get(link.resolution.as_str())
-                },
-                _ => None, // Or handle other types
-            }
-        }).copied()
+fn get_resolution(link_name: &str, config: &Config) -> Result<(usize, usize)> {
+    let resolution_key = config.links.iter().find(|link| link.name == link_name)
+        .ok_or_else(|| eyre!("Link type '{}' not found in config", link_name))?.resolution.as_str(); // Convert to &str
+
+    match link_name {
+        "shorts" => SHORTS_RESOLUTIONS.get(resolution_key)
+            .copied()
+            .ok_or_else(|| eyre!("Resolution not found for shorts")),
+        "youtube" | _ => RESOLUTIONS.get(resolution_key)
+            .copied()
+            .ok_or_else(|| eyre!("Resolution not found for {}", link_name)),
+    }
 }
+
 
 #[derive(Debug)]
 struct VideoMetadata {
@@ -258,9 +251,17 @@ async fn main() -> Result<()> {
 
 async fn handle_url(url: &str, config: &Config) -> Result<()> {
     match LinkType::from_url(url, config)? {
+        LinkType::Shorts(url, folder, width, height) => handle_shorts_url(&url, &folder, width, height, config).await,
         LinkType::YouTube(url, folder, width, height) => handle_youtube_url(&url, &folder, width, height, config).await,
         LinkType::WebLink(url, folder, width, height) => handle_weblink_url(&url, &folder, width, height, config).await,
     }
+}
+
+async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    let video_id = extract_video_id(url)?;
+    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
+    let embed_code = generate_embed_code(&video_id, width, height);
+    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
 }
 
 async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
@@ -305,9 +306,30 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
 mod tests {
     use super::*;
 
+    fn load_test_config() -> Config {
+        let config_path = shellexpand::tilde("~/.config/obsidian-link/obsidian-link.yml");
+        let config_path = Path::new(config_path.as_ref());
+
+        load_config(config_path.to_path_buf()).expect("Failed to load config")
+    }
+
+    #[tokio::test]
+    async fn test_youtube_shorts_identification() {
+        let config = load_test_config();
+        let shorts_urls = vec![
+            "https://www.youtube.com/shorts/gGrqPbb6fuM",
+            "https://www.youtube.com/shorts/FjkS5rjNq-A",
+        ];
+        for url in shorts_urls {
+            let link_type = LinkType::from_url(url, &config).expect("Failed to identify link type");
+            assert!(matches!(link_type, LinkType::Shorts(..))); // Updated to expect Shorts
+        }
+    }
+
+
     #[tokio::test]
     async fn test_youtube_url_identification() {
-        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
+        let config = load_test_config();
 
         let youtube_urls = vec![
             "https://www.youtube.com/watch?v=y4evLICF8kk",
@@ -317,40 +339,24 @@ mod tests {
         ];
 
         for url in youtube_urls {
-            let link_type = LinkType::from_url(url, &config).unwrap();
+            let link_type = LinkType::from_url(url, &config).expect("Failed to identify link type");
             assert!(matches!(link_type, LinkType::YouTube(..)));
         }
     }
 
-    #[tokio::test]
-    async fn test_youtube_shorts_identification() {
-        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
-
-        let shorts_urls = vec![
-            "https://www.youtube.com/shorts/gGrqPbb6fuM",
-            "https://www.youtube.com/shorts/FjkS5rjNq-A",
-        ];
-
-        for url in shorts_urls {
-            let link_type = LinkType::from_url(url, &config).unwrap();
-            assert!(matches!(link_type, LinkType::YouTube(..)));
-        }
-    }
 
     #[tokio::test]
     async fn test_weblink_identification() {
-        let config = load_config(PathBuf::from("~/.config/obsidian-link/obsidian-link.yml")).unwrap();
+        let config = load_test_config();
 
         let weblink_urls = vec![
             "https://parrot.ai/",
             "https://pdfgpt.io/",
-            // Add other weblink URLs here
         ];
 
         for url in weblink_urls {
-            let link_type = LinkType::from_url(url, &config).unwrap();
+            let link_type = LinkType::from_url(url, &config).expect("Failed to identify link type");
             assert!(matches!(link_type, LinkType::WebLink(..)));
         }
     }
 }
-

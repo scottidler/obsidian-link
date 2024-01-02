@@ -10,10 +10,10 @@ frontmatter:
 links:
   - name: shorts
     regex: https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]+)
-    resolution: 420p
+    resolution: 480p
     folder: youtube
   - name: youtube
-    regex: https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)
+    regex: https?://(?:www\.)?(youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)
     resolution: FWVGA
     folder: youtube
   - name: default
