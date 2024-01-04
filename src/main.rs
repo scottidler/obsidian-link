@@ -93,9 +93,15 @@ enum LinkType {
 
 impl LinkType {
     fn from_url(url: &str, config: &Config) -> Result<LinkType> {
+        let mut default_link = None;
+
         for link in &config.links {
             let regex = Regex::new(&link.regex)?;
             if regex.is_match(url) {
+                if link.name == "default" {
+                    default_link = Some(LinkType::WebLink(url.to_string(), link.folder.clone(), 0, 0));
+                    continue;
+                }
                 let (width, height) = get_resolution(&link.name, config)?;
                 return Ok(match link.name.as_str() {
                     "shorts" => LinkType::Shorts(url.to_string(), link.folder.clone(), width, height),
@@ -104,7 +110,12 @@ impl LinkType {
                 });
             }
         }
-        Err(eyre!("No matching link type found for URL"))
+
+        if let Some(default_link) = default_link {
+            return Ok(default_link);
+        }
+
+        Err(eyre!("Invalid URL format"))
     }
 }
 
@@ -121,7 +132,6 @@ fn get_resolution(link_name: &str, config: &Config) -> Result<(usize, usize)> {
             .ok_or_else(|| eyre!("Resolution not found for {}", link_name)),
     }
 }
-
 
 #[derive(Debug)]
 struct VideoMetadata {
@@ -160,10 +170,12 @@ fn extract_video_id(url: &str) -> Result<String> {
 }
 
 async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, folder: &str, frontmatter: &Frontmatter) -> Result<()> {
-    let vault_path_str = vault_path.to_str()
-        .ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
+    let vault_path_str = vault_path.to_str().ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
     let vault_path_expanded = expanduser(vault_path_str)?;
     let full_path = vault_path_expanded.join(folder);
+
+    std::fs::create_dir_all(&full_path).map_err(|e| eyre!("Failed to create directory: {:?} with error {}", full_path, e))?;
+
     let file_name = sanitize_filename(&metadata.title);
     let file_path = full_path.join(file_name + ".md");
 
@@ -174,6 +186,7 @@ async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_
     write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, metadata.description)
         .map_err(|e| eyre!("Failed to write to markdown file: {}", e))
 }
+
 
 fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> String {
     let mut frontmatter_str = String::from("---\n");
@@ -209,7 +222,6 @@ fn generate_embed_code(video_id: &str, width: usize, height: usize) -> String {
     )
 }
 
-
 fn today() -> (String, String, String) {
     let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
     let now = Utc::now().with_timezone(&tz);
@@ -235,7 +247,9 @@ fn sanitize_tag(tag: &str) -> String {
 }
 
 fn sanitize_filename(title: &str) -> String {
-    title.replace(&['<', '>', ':', '"', '/', '\\', '|', '?', '*'][..], "-")
+    title.chars()
+         .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-')
+         .collect::<String>()
 }
 
 #[tokio::main]
@@ -285,6 +299,10 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
     let response = reqwest::get(&url).await?
         .json::<serde_json::Value>().await?;
 
+    if response["items"].as_array().unwrap_or(&Vec::new()).is_empty() {
+        return Err(eyre!("Video metadata not found for ID: {}", video_id));
+    }
+
     let snippet = &response["items"][0]["snippet"];
     Ok(VideoMetadata {
         id: video_id.to_string(),
@@ -300,6 +318,7 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
             .collect(),
     })
 }
+
 
 
 #[cfg(test)]
@@ -358,5 +377,61 @@ mod tests {
             let link_type = LinkType::from_url(url, &config).expect("Failed to identify link type");
             assert!(matches!(link_type, LinkType::WebLink(..)));
         }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_shorts_url_format() {
+        let config = load_test_config();
+        let invalid_shorts_url = "https://www.youtube.com/notshorts/gGrqPbb6fuM";
+        let link_type = LinkType::from_url(invalid_shorts_url, &config).expect("Failed to identify link type");
+        assert!(matches!(link_type, LinkType::WebLink(..)), "Expected a WebLink for invalid Shorts URL format");
+    }
+
+    /*
+    #[tokio::test]
+    async fn test_invalid_youtube_url_format() {
+        let config = load_test_config();
+        let invalid_youtube_url = "https://www.notyoutube.com/watch?v=y4evLICF8kk";
+        assert!(LinkType::from_url(invalid_youtube_url, &config).is_err(), "Expected an error for invalid YouTube URL format");
+    }
+    */
+
+    #[tokio::test]
+    async fn test_invalid_youtube_url_format() {
+        let config = load_test_config();
+        let invalid_youtube_url = "https://www.notyoutube.com/watch?v=y4evLICF8kk";
+        let link_type = LinkType::from_url(invalid_youtube_url, &config).expect("Failed to identify link type");
+        assert!(matches!(link_type, LinkType::WebLink(..)), "Expected a WebLink for invalid YouTube URL format");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_metadata_nonexistent_video() {
+        let non_existent_video_id = "thisdoesnotexist12345";
+        let result = fetch_video_metadata(&YOUTUBE_API_KEY, non_existent_video_id).await;
+        assert!(result.is_err(), "Expected an error for non-existent video metadata fetch");
+    }
+
+    #[test]
+    fn test_generate_embed_code_non_integer() {
+        let video_id = "y4evLICF8kk";
+        let embed_code = generate_embed_code(video_id, 0, 0);
+        assert!(embed_code.contains("width=\"0\""), "Embed code should contain width=\"0\"");
+        assert!(embed_code.contains("height=\"0\""), "Embed code should contain height=\"0\"");
+    }
+
+    #[tokio::test]
+    async fn test_create_markdown_special_characters() {
+        let metadata = VideoMetadata {
+            id: String::from("y4evLICF8kk"),
+            title: String::from("Test: Special/Characters?*"),
+            description: String::from("A test video."),
+            channel: String::from("Test Channel"),
+            published_at: String::from("2024-01-01"),
+            tags: vec![String::from("test")],
+        };
+        let embed_code = generate_embed_code(&metadata.id, 1920, 1080);
+        let config = load_test_config();
+        let result = create_markdown_file(&metadata, &embed_code, &config.vault, "test_folder", &config.frontmatter).await;
+        assert!(result.is_ok(), "Failed to create markdown file with special characters in title");
     }
 }
