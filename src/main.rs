@@ -1,5 +1,6 @@
 #![cfg_attr(debug_assertions, allow(unused_imports, unused_variables, unused_mut, dead_code))]
 
+use log::{debug, info, warn, error};
 use std::path::{Path, PathBuf};
 use std::io::Write;
 use std::env;
@@ -20,6 +21,7 @@ use lazy_static::lazy_static;
 const TIMEZONE: &str = "America/Los_Angeles";
 
 lazy_static! {
+    static ref LOG_LEVEL: String = std::env::var("LOG_LEVEL").unwrap_or("INFO".to_string());
     static ref YOUTUBE_API_KEY: String = env::var("YOUTUBE_API_KEY").expect("YOUTUBE_API_KEY not set in environment");
     static ref CHATGPT_API_KEY: String = env::var("CHATGPT_API_KEY").expect("CHATGPT_API_KEY not set in environment");
     static ref RESOLUTIONS: HashMap<&'static str, (usize, usize)> = {
@@ -93,6 +95,7 @@ enum LinkType {
 
 impl LinkType {
     fn from_url(url: &str, config: &Config) -> Result<LinkType> {
+        debug!("LinkType::from_url: url={} config={:?}", url, config);
         let mut default_link = None;
 
         for link in &config.links {
@@ -120,6 +123,7 @@ impl LinkType {
 }
 
 fn get_resolution(link_name: &str, config: &Config) -> Result<(usize, usize)> {
+    debug!("get_resolution: link_name={} config={:?}", link_name, config);
     let resolution_key = config.links.iter().find(|link| link.name == link_name)
         .ok_or_else(|| eyre!("Link type '{}' not found in config", link_name))?.resolution.as_str(); // Convert to &str
 
@@ -149,6 +153,7 @@ fn expanduser<T: AsRef<str>>(path: T) -> Result<PathBuf> {
 }
 
 fn load_config(config_path: PathBuf) -> Result<Config> {
+    debug!("load_config: config_path={}", config_path.display());
     let config_path_str = config_path.to_str()
         .ok_or_else(|| eyre!("Failed to convert config path to string"))?;
     let config_path_expanded = expanduser(config_path_str)?;
@@ -160,6 +165,7 @@ fn load_config(config_path: PathBuf) -> Result<Config> {
 }
 
 fn extract_video_id(url: &str) -> Result<String> {
+    debug!("extract_video_id: url={}", url);
     let pattern = Regex::new(r#"(youtu\.be/|youtube\.com/(watch\?(.*&)?v=|(embed|v|shorts)/))([^?&">]+)"#)
         .map_err(|e| eyre!("Failed to compile regex: {}", e))?;
 
@@ -170,6 +176,7 @@ fn extract_video_id(url: &str) -> Result<String> {
 }
 
 async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, folder: &str, frontmatter: &Frontmatter) -> Result<()> {
+    debug!("create_markdown_file: metadata={:?} embed_code={} vault_path={} folder={} frontmatter={:?}", metadata, embed_code, vault_path.display(), folder, frontmatter);
     let vault_path_str = vault_path.to_str().ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
     let vault_path_expanded = expanduser(vault_path_str)?;
     let full_path = vault_path_expanded.join(folder);
@@ -189,6 +196,7 @@ async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_
 
 
 fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> String {
+    debug!("format_frontmatter: frontmatter={:?} metadata={:?}", frontmatter, metadata);
     let mut frontmatter_str = String::from("---\n");
 
     let (current_date, current_day, current_time) = today();
@@ -216,6 +224,7 @@ fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> St
 }
 
 fn generate_embed_code(video_id: &str, width: usize, height: usize) -> String {
+    debug!("generate_embed_code: video_id={} width={} height={}", video_id, width, height);
     format!(
         "<iframe width=\"{}\" height=\"{}\" src=\"https://www.youtube.com/embed/{}\" frameborder=\"0\" allowfullscreen></iframe>",
         width, height, video_id
@@ -223,6 +232,7 @@ fn generate_embed_code(video_id: &str, width: usize, height: usize) -> String {
 }
 
 fn today() -> (String, String, String) {
+    debug!("today");
     let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
     let now = Utc::now().with_timezone(&tz);
 
@@ -238,6 +248,7 @@ fn today() -> (String, String, String) {
 }
 
 fn sanitize_tag(tag: &str) -> String {
+    debug!("sanitize_tag: tag={}", tag);
     tag.replace("'", "")
        .chars()
        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { '-' })
@@ -247,23 +258,14 @@ fn sanitize_tag(tag: &str) -> String {
 }
 
 fn sanitize_filename(title: &str) -> String {
+    debug!("sanitize_filename: title={}", title);
     title.chars()
          .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-')
          .collect::<String>()
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Cli::parse();
-    let config = load_config(args.config)?;
-
-    match args.youtube_url {
-        Some(url) => handle_url(&url, &config).await,
-        None => Err(eyre!("No URL provided")),
-    }
-}
-
 async fn handle_url(url: &str, config: &Config) -> Result<()> {
+    debug!("handle_url: url={} config={:?}", url, config);
     match LinkType::from_url(url, config)? {
         LinkType::Shorts(url, folder, width, height) => handle_shorts_url(&url, &folder, width, height, config).await,
         LinkType::YouTube(url, folder, width, height) => handle_youtube_url(&url, &folder, width, height, config).await,
@@ -272,6 +274,7 @@ async fn handle_url(url: &str, config: &Config) -> Result<()> {
 }
 
 async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_shorts_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
     let embed_code = generate_embed_code(&video_id, width, height);
@@ -279,6 +282,7 @@ async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize,
 }
 
 async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_youtube_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
     let embed_code = generate_embed_code(&video_id, width, height);
@@ -286,11 +290,13 @@ async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize
 }
 
 async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_weblink_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
     // Web link handling logic
     Ok(())
 }
 
 async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMetadata> {
+    debug!("fetch_video_metadata: api_key={} video_id={}", api_key, video_id);
     let url = format!(
         "https://www.googleapis.com/youtube/v3/videos?id={}&part=snippet&key={}",
         video_id, api_key
@@ -300,7 +306,7 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
         .json::<serde_json::Value>().await?;
 
     if response["items"].as_array().unwrap_or(&Vec::new()).is_empty() {
-        return Err(eyre!("Video metadata not found for ID: {}", video_id));
+        return Err(eyre!("Video metadata not found for video_id={}", video_id));
     }
 
     let snippet = &response["items"][0]["snippet"];
@@ -319,6 +325,18 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
     })
 }
 
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_LEVEL.as_str())).init();
+    info!("obsidian-link");
+    let args = Cli::parse();
+    let config = load_config(args.config)?;
+
+    match args.youtube_url {
+        Some(url) => handle_url(&url, &config).await,
+        None => Err(eyre!("No URL provided")),
+    }
+}
 
 
 #[cfg(test)]
@@ -344,7 +362,6 @@ mod tests {
             assert!(matches!(link_type, LinkType::Shorts(..))); // Updated to expect Shorts
         }
     }
-
 
     #[tokio::test]
     async fn test_youtube_url_identification() {
@@ -386,15 +403,6 @@ mod tests {
         let link_type = LinkType::from_url(invalid_shorts_url, &config).expect("Failed to identify link type");
         assert!(matches!(link_type, LinkType::WebLink(..)), "Expected a WebLink for invalid Shorts URL format");
     }
-
-    /*
-    #[tokio::test]
-    async fn test_invalid_youtube_url_format() {
-        let config = load_test_config();
-        let invalid_youtube_url = "https://www.notyoutube.com/watch?v=y4evLICF8kk";
-        assert!(LinkType::from_url(invalid_youtube_url, &config).is_err(), "Expected an error for invalid YouTube URL format");
-    }
-    */
 
     #[tokio::test]
     async fn test_invalid_youtube_url_format() {
