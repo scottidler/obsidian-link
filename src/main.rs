@@ -52,6 +52,16 @@ lazy_static! {
     };
 }
 
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    #[clap(short, long, value_parser, default_value = "~/.config/obsidian-link/obsidian-link.yml")]
+    config: PathBuf,
+
+    #[clap(short, long)]
+    youtube_url: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 struct Config {
     vault: PathBuf,
@@ -77,14 +87,14 @@ struct Link {
     folder: String,
 }
 
-#[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
-struct Cli {
-    #[clap(short, long, value_parser, default_value = "~/.config/obsidian-link/obsidian-link.yml")]
-    config: PathBuf,
-
-    #[clap(short, long)]
-    youtube_url: Option<String>,
+#[derive(Debug)]
+struct VideoMetadata {
+    id: String,
+    title: String,
+    description: String,
+    channel: String,
+    published_at: String,
+    tags: Vec<String>,
 }
 
 enum LinkType {
@@ -122,6 +132,27 @@ impl LinkType {
     }
 }
 
+fn expanduser<T: AsRef<str>>(path: T) -> Result<PathBuf> {
+    let expanded_path_str = shellexpand::tilde(path.as_ref());
+    Ok(PathBuf::from(expanded_path_str.into_owned()))
+}
+
+fn today() -> (String, String, String) {
+    debug!("today");
+    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
+    let now = Utc::now().with_timezone(&tz);
+
+    let date_format = StrftimeItems::new("%Y-%m-%d");
+    let day_format = StrftimeItems::new("%a");
+    let time_format = StrftimeItems::new("%H:%M");
+
+    let formatted_date = now.format_with_items(date_format).to_string();
+    let formatted_day = now.format_with_items(day_format).to_string();
+    let formatted_time = now.format_with_items(time_format).to_string();
+
+    (formatted_date, formatted_day, formatted_time)
+}
+
 fn get_resolution(link_name: &str, config: &Config) -> Result<(usize, usize)> {
     debug!("get_resolution: link_name={} config={:?}", link_name, config);
     let resolution_key = config.links.iter().find(|link| link.name == link_name)
@@ -135,21 +166,6 @@ fn get_resolution(link_name: &str, config: &Config) -> Result<(usize, usize)> {
             .copied()
             .ok_or_else(|| eyre!("Resolution not found for {}", link_name)),
     }
-}
-
-#[derive(Debug)]
-struct VideoMetadata {
-    id: String,
-    title: String,
-    description: String,
-    channel: String,
-    published_at: String,
-    tags: Vec<String>,
-}
-
-fn expanduser<T: AsRef<str>>(path: T) -> Result<PathBuf> {
-    let expanded_path_str = shellexpand::tilde(path.as_ref());
-    Ok(PathBuf::from(expanded_path_str.into_owned()))
 }
 
 fn load_config(config_path: PathBuf) -> Result<Config> {
@@ -231,22 +247,6 @@ fn generate_embed_code(video_id: &str, width: usize, height: usize) -> String {
     )
 }
 
-fn today() -> (String, String, String) {
-    debug!("today");
-    let tz: Tz = TIMEZONE.parse().expect("Invalid timezone");
-    let now = Utc::now().with_timezone(&tz);
-
-    let date_format = StrftimeItems::new("%Y-%m-%d");
-    let day_format = StrftimeItems::new("%a");
-    let time_format = StrftimeItems::new("%H:%M");
-
-    let formatted_date = now.format_with_items(date_format).to_string();
-    let formatted_day = now.format_with_items(day_format).to_string();
-    let formatted_time = now.format_with_items(time_format).to_string();
-
-    (formatted_date, formatted_day, formatted_time)
-}
-
 fn sanitize_tag(tag: &str) -> String {
     debug!("sanitize_tag: tag={}", tag);
     tag.replace("'", "")
@@ -262,37 +262,6 @@ fn sanitize_filename(title: &str) -> String {
     title.chars()
          .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-')
          .collect::<String>()
-}
-
-async fn handle_url(url: &str, config: &Config) -> Result<()> {
-    debug!("handle_url: url={} config={:?}", url, config);
-    match LinkType::from_url(url, config)? {
-        LinkType::Shorts(url, folder, width, height) => handle_shorts_url(&url, &folder, width, height, config).await,
-        LinkType::YouTube(url, folder, width, height) => handle_youtube_url(&url, &folder, width, height, config).await,
-        LinkType::WebLink(url, folder, width, height) => handle_weblink_url(&url, &folder, width, height, config).await,
-    }
-}
-
-async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
-    debug!("handle_shorts_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
-    let video_id = extract_video_id(url)?;
-    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
-    let embed_code = generate_embed_code(&video_id, width, height);
-    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
-}
-
-async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
-    debug!("handle_youtube_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
-    let video_id = extract_video_id(url)?;
-    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
-    let embed_code = generate_embed_code(&video_id, width, height);
-    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
-}
-
-async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
-    debug!("handle_weblink_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
-    // Web link handling logic
-    Ok(())
 }
 
 async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMetadata> {
@@ -323,6 +292,37 @@ async fn fetch_video_metadata(api_key: &str, video_id: &str) -> Result<VideoMeta
             .map(String::from)
             .collect(),
     })
+}
+
+async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_shorts_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
+    let video_id = extract_video_id(url)?;
+    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
+    let embed_code = generate_embed_code(&video_id, width, height);
+    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
+}
+
+async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_youtube_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
+    let video_id = extract_video_id(url)?;
+    let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
+    let embed_code = generate_embed_code(&video_id, width, height);
+    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
+}
+
+async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_weblink_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
+    // Web link handling logic
+    Ok(())
+}
+
+async fn handle_url(url: &str, config: &Config) -> Result<()> {
+    debug!("handle_url: url={} config={:?}", url, config);
+    match LinkType::from_url(url, config)? {
+        LinkType::Shorts(url, folder, width, height) => handle_shorts_url(&url, &folder, width, height, config).await,
+        LinkType::YouTube(url, folder, width, height) => handle_youtube_url(&url, &folder, width, height, config).await,
+        LinkType::WebLink(url, folder, width, height) => handle_weblink_url(&url, &folder, width, height, config).await,
+    }
 }
 
 #[tokio::main]
