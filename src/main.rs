@@ -59,7 +59,7 @@ struct Cli {
     config: PathBuf,
 
     #[clap(short, long)]
-    youtube_url: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -191,28 +191,27 @@ fn extract_video_id(url: &str) -> Result<String> {
         .ok_or_else(|| eyre!("Failed to extract video ID from URL"))
 }
 
-async fn create_markdown_file(metadata: &VideoMetadata, embed_code: &str, vault_path: &PathBuf, folder: &str, frontmatter: &Frontmatter) -> Result<()> {
-    debug!("create_markdown_file: metadata={:?} embed_code={} vault_path={} folder={} frontmatter={:?}", metadata, embed_code, vault_path.display(), folder, frontmatter);
+async fn create_markdown_file(title: &str, description: &str, embed_code: &str, url: &str, author: &str, tags: &[String], vault_path: &PathBuf, folder: &str, frontmatter: &Frontmatter) -> Result<()> {
+    debug!("create_markdown_file: title={} description={} embed_code={} url={} author={} tags={:?} vault_path={} folder={} frontmatter={:?}", title, description, embed_code, url, author, tags, vault_path.display(), folder, frontmatter);
     let vault_path_str = vault_path.to_str().ok_or_else(|| eyre!("Failed to convert vault path to string"))?;
     let vault_path_expanded = expanduser(vault_path_str)?;
     let full_path = vault_path_expanded.join(folder);
 
     std::fs::create_dir_all(&full_path).map_err(|e| eyre!("Failed to create directory: {:?} with error {}", full_path, e))?;
 
-    let file_name = sanitize_filename(&metadata.title);
+    let file_name = sanitize_filename(title);
     let file_path = full_path.join(file_name + ".md");
 
     let mut file = std::fs::File::create(&file_path)
         .map_err(|e| eyre!("Failed to create markdown file: {:?} with error {}", file_path, e))?;
 
-    let frontmatter_str = format_frontmatter(frontmatter, metadata);
-    write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, metadata.description)
+    let frontmatter_str = format_frontmatter(frontmatter, url, author, tags);
+    write!(file, "{}\n{}\n\n## Description\n{}", frontmatter_str, embed_code, description)
         .map_err(|e| eyre!("Failed to write to markdown file: {}", e))
 }
 
-
-fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> String {
-    debug!("format_frontmatter: frontmatter={:?} metadata={:?}", frontmatter, metadata);
+fn format_frontmatter(frontmatter: &Frontmatter, url: &str, author: &str, tags: &[String]) -> String {
+    debug!("format_frontmatter: frontmatter={:?} url={} author={} tags={:?}", frontmatter, url, author, tags);
     let mut frontmatter_str = String::from("---\n");
 
     let (current_date, current_day, current_time) = today();
@@ -220,7 +219,6 @@ fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> St
     frontmatter_str += &format!("day: {}\n", frontmatter.day.as_ref().unwrap_or(&current_day));
     frontmatter_str += &format!("time: {}\n", frontmatter.time.as_ref().unwrap_or(&current_time));
 
-    let tags = frontmatter.tags.as_ref().unwrap_or(&metadata.tags);
     if !tags.is_empty() {
         frontmatter_str += "tags:\n";
         for tag in tags {
@@ -228,12 +226,8 @@ fn format_frontmatter(frontmatter: &Frontmatter, metadata: &VideoMetadata) -> St
         }
     }
 
-    if let Some(url) = &frontmatter.url {
-        frontmatter_str += &format!("url: {}\n", url);
-    } else {
-        frontmatter_str += &format!("url: https://www.youtube.com/watch?v={}\n", metadata.id);
-    }
-    frontmatter_str += &format!("author: {}\n", frontmatter.author.as_ref().unwrap_or(&metadata.channel));
+    frontmatter_str += &format!("url: {}\n", url);
+    frontmatter_str += &format!("author: {}\n", author);
 
     frontmatter_str += "---\n\n";
     frontmatter_str
@@ -299,7 +293,17 @@ async fn handle_shorts_url(url: &str, folder: &str, width: usize, height: usize,
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
     let embed_code = generate_embed_code(&video_id, width, height);
-    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
+    create_markdown_file(
+        &metadata.title,
+        &metadata.description,
+        &embed_code,
+        url,
+        &metadata.channel,
+        &metadata.tags,
+        &config.vault,
+        folder,
+        &config.frontmatter
+    ).await
 }
 
 async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
@@ -307,13 +311,40 @@ async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize
     let video_id = extract_video_id(url)?;
     let metadata = fetch_video_metadata(&YOUTUBE_API_KEY, &video_id).await?;
     let embed_code = generate_embed_code(&video_id, width, height);
-    create_markdown_file(&metadata, &embed_code, &config.vault, folder, &config.frontmatter).await
+    create_markdown_file(
+        &metadata.title,
+        &metadata.description,
+        &embed_code,
+        url,
+        &metadata.channel,
+        &metadata.tags,
+        &config.vault,
+        folder,
+        &config.frontmatter
+    ).await
 }
 
 async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
     debug!("handle_weblink_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
-    // Web link handling logic
-    Ok(())
+
+    let title = "Some Title";
+    let description = "Some Description";
+    let author = "Some Author";
+    let tags_str = vec!["tag1", "tag2"];
+    let tags: Vec<String> = tags_str.iter().map(|s| s.to_string()).collect();
+    let embed_code = "";
+
+    create_markdown_file(
+        title,
+        description,
+        embed_code,
+        url,
+        author,
+        &tags,
+        &config.vault,
+        folder,
+        &config.frontmatter
+    ).await
 }
 
 async fn handle_url(url: &str, config: &Config) -> Result<()> {
@@ -332,7 +363,7 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
     let config = load_config(args.config)?;
 
-    match args.youtube_url {
+    match args.url {
         Some(url) => handle_url(&url, &config).await,
         None => Err(eyre!("No URL provided")),
     }
@@ -367,19 +398,18 @@ mod tests {
     async fn test_youtube_url_identification() {
         let config = load_test_config();
 
-        let youtube_urls = vec![
+        let urls = vec![
             "https://www.youtube.com/watch?v=y4evLICF8kk",
             "https://www.youtube.com/watch?v=U3HndX2QnSo",
             "https://youtu.be/EkDxsQRbIwoA",
             "https://youtu.be/m7lnIdudEy8?si=VE-14Y1Sk93RdA5u",
         ];
 
-        for url in youtube_urls {
+        for url in urls {
             let link_type = LinkType::from_url(url, &config).expect("Failed to identify link type");
             assert!(matches!(link_type, LinkType::YouTube(..)));
         }
     }
-
 
     #[tokio::test]
     async fn test_weblink_identification() {
@@ -429,17 +459,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_markdown_special_characters() {
-        let metadata = VideoMetadata {
-            id: String::from("y4evLICF8kk"),
-            title: String::from("Test: Special/Characters?*"),
-            description: String::from("A test video."),
-            channel: String::from("Test Channel"),
-            published_at: String::from("2024-01-01"),
-            tags: vec![String::from("test")],
-        };
-        let embed_code = generate_embed_code(&metadata.id, 1920, 1080);
+        let title = "Test: Special/Characters?*";
+        let description = "A test video.";
+        let embed_code = "<iframe...></iframe>"; // Example embed code
+        let url = "https://www.example.com";
+        let author = "Test Channel";
+        let tags = vec![String::from("test")];
         let config = load_test_config();
-        let result = create_markdown_file(&metadata, &embed_code, &config.vault, "test_folder", &config.frontmatter).await;
+
+        let result = create_markdown_file(
+            title,
+            description,
+            &embed_code,
+            url,
+            author,
+            &tags,
+            &config.vault,
+            "test_folder",
+            &config.frontmatter
+        ).await;
+
         assert!(result.is_ok(), "Failed to create markdown file with special characters in title");
     }
 }
