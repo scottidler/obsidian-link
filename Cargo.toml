@@ -7,17 +7,18 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.4.11", features = ["derive"] }
+tokio = { version = "1.35.1", features = ["full"] }
+reqwest = { version = "0.11.23", features = ["json", "stream"] }
 serde = { version = "1.0.193", features = ["derive"] }
+serde_json = "1.0.108"
 serde_yaml = "0.9.29"
 eyre = "0.6.11"
 regex = "1.10.2"
 shellexpand = "3.1.0"
-reqwest = { version = "0.11.23", features = ["json"] }
 lazy_static = "1.4.0"
 json = "0.12.4"
-tokio = { version = "1.35.1", features = ["full"] }
-serde_json = "1.0.108"
 chrono = "0.4.31"
 chrono-tz = "0.8.4"
 log = "0.4.20"
 env_logger = "0.10.1"
+scraper = "0.18.1"

@@ -15,7 +15,9 @@ use chrono::format::StrftimeItems;
 use regex::Regex;
 use clap::{Parser, Args};
 use serde::Deserialize;
+use serde_json::{json, Value};
 use eyre::{eyre, Result};
+use scraper::{Html, Selector};
 use lazy_static::lazy_static;
 
 const TIMEZONE: &str = "America/Los_Angeles";
@@ -111,11 +113,11 @@ impl LinkType {
         for link in &config.links {
             let regex = Regex::new(&link.regex)?;
             if regex.is_match(url) {
+                let (width, height) = get_resolution(&link.name, config)?;
                 if link.name == "default" {
-                    default_link = Some(LinkType::WebLink(url.to_string(), link.folder.clone(), 0, 0));
+                    default_link = Some(LinkType::WebLink(url.to_string(), link.folder.clone(), width, height));
                     continue;
                 }
-                let (width, height) = get_resolution(&link.name, config)?;
                 return Ok(match link.name.as_str() {
                     "shorts" => LinkType::Shorts(url.to_string(), link.folder.clone(), width, height),
                     "youtube" => LinkType::YouTube(url.to_string(), link.folder.clone(), width, height),
@@ -324,22 +326,76 @@ async fn handle_youtube_url(url: &str, folder: &str, width: usize, height: usize
     ).await
 }
 
-async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
-    debug!("handle_weblink_url: url={} folder={} width={} height={} config={:?}", url, folder, width, height, config);
+async fn fetch_and_summarize_url_with_chatgpt(url: &str) -> Result<(String, String, String, String, Vec<String>)> {
+    let client = reqwest::Client::new();
+    let (today, _, _) = today();
+    let prompt = format!(
+        "Please visit the URL '{}' and provide a JSON object with the article's title, summary, author, main image URL, and tags.",
+        url
+    );
 
-    let title = "Some Title";
-    let description = "Some Description";
-    let author = "Some Author";
-    let tags_str = vec!["tag1", "tag2"];
-    let tags: Vec<String> = tags_str.iter().map(|s| s.to_string()).collect();
-    let embed_code = "";
+    let request_body = json!({
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ]
+    });
+
+    let response = client.post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", CHATGPT_API_KEY.as_str()))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await?;
+
+    if response.status() == 200 {
+        let response_body = response.json::<Value>().await?;
+        let assistant_reply = &response_body["choices"][0]["message"]["content"];
+
+        // Parsing the JSON response
+        if let Some(parsed) = assistant_reply.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
+            let title = parsed["title"].as_str().unwrap_or(&format!("No Title {}", today)).to_string();
+            let summary = parsed["summary"].as_str().unwrap_or_default().to_string();
+            let author = parsed["author"].as_str().unwrap_or_default().to_string();
+            let image = parsed["image"].as_str().unwrap_or_default().to_string();
+            let tags = parsed["tags"].as_array().map_or_else(Vec::new, |arr| {
+                arr.iter().filter_map(|tag| tag.as_str().map(String::from)).collect()
+            });
+
+            Ok((title, summary, author, image, tags))
+        } else {
+            error!("Failed to parse ChatGPT response: {:?}", response_body);
+            Err(eyre!("Failed to parse ChatGPT response"))
+        }
+    } else {
+        Err(eyre!("Error: {}", response.text().await?))
+    }
+}
+
+
+fn generate_image_embed_code(img_url: &str, width: usize, height: usize) -> String {
+    format!(
+        "<img src=\"{}\" width=\"{}\" height=\"{}\" alt=\"Image\" />",
+        img_url, width, height
+    )
+}
+
+async fn handle_weblink_url(url: &str, folder: &str, width: usize, height: usize, config: &Config) -> Result<()> {
+    debug!("handle_weblink_url: url={} folder={} config={:?}", url, folder, config);
+    let (title, summary, author, image, tags) = fetch_and_summarize_url_with_chatgpt(url).await?;
+    let embed_code = if !image.is_empty() {
+        generate_image_embed_code(&image, width, height)
+    } else {
+        String::new()
+    };
 
     create_markdown_file(
-        title,
-        description,
-        embed_code,
+        &title,
+        &summary,
+        &embed_code,
         url,
-        author,
+        &author,
         &tags,
         &config.vault,
         folder,
